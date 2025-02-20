@@ -104,6 +104,7 @@ def perceptron_single_step_update(
 
 
 def perceptron(feature_matrix, labels, T):
+
     """
     Runs the full perceptron algorithm on a given set of data. Runs T
     iterations through the data set: we do not stop early.
@@ -125,12 +126,20 @@ def perceptron(feature_matrix, labels, T):
         the offset parameter `theta_0` as a floating point number
             (found also after T iterations through the feature matrix).
     """
-    # Your code here
-    current_theta = np.zeros(feature_matrix.shape[1])
-    current_theta_0 = float(0)
-    for t in range(T):
-        for i in range(feature_matrix.shape[0]):
-            (current_theta,current_theta_0) = perceptron_single_step_update(feature_matrix[i],labels[i],current_theta,current_theta_0)
+    # Initialize parameters with float64 precision
+    current_theta = np.zeros(feature_matrix.shape[1], dtype=np.float64)
+    current_theta_0 = np.float64(0)
+
+    for t in range(T):  # Loop through dataset T times
+        for i in range(feature_matrix.shape[0]):  # Iterate through each sample
+            fx = labels[i] * (np.dot(feature_matrix[i],current_theta)+current_theta_0)
+            if fx<=0:
+                current_theta = current_theta + feature_matrix[i]*labels[i]
+                current_theta_0 = current_theta_0 + labels[i]
+
+
+            # Debugging: Print updates to track issues
+            #print(f"Iteration {t}, Sample {i}, Updated Theta: {current_theta}, Updated Theta_0: {current_theta_0}")
 
     return (current_theta,current_theta_0)
 
