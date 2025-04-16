@@ -42,11 +42,23 @@ def main():
 
     #################################
     ## Model specification TODO
+
     model = nn.Sequential(
-              nn.Conv2d(1, 32, (3, 3)),
-              nn.ReLU(),
-              nn.MaxPool2d((2, 2)),
-            )
+        nn.Conv2d(1, 32, kernel_size=(3, 3)),  # Conv layer 1
+        nn.ReLU(),
+        nn.MaxPool2d(kernel_size=(2, 2)),
+
+        nn.Conv2d(32, 64, kernel_size=(3, 3)), # Conv layer 2
+        nn.ReLU(),
+        nn.MaxPool2d(kernel_size=(2, 2)),
+
+        nn.Flatten(),                            # Flatten before fully connected layer
+
+        nn.Linear(64 * 5 * 5, 128),           # FC layer (assuming input is 28x28 like MNIST)
+        #nn.ReLU(),
+        nn.Dropout(p=0.5),                    # Dropout layer
+        nn.Linear(128, 10)                    # Output layer (10 classes)
+    )                        
     ##################################
 
     train_model(train_batches, dev_batches, model, nesterov=True)

@@ -16,16 +16,46 @@ img_rows, img_cols = 42, 28 # input image dimensions
 
 
 class CNN(nn.Module):
-
     def __init__(self, input_dimension):
         super(CNN, self).__init__()
-        # TODO initialize model layers here
+        self.flatten = Flatten()
+
+        # Convolutional feature extractor
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3)  # (N, 1, 28, 28) → (N, 32, 26, 26)
+        self.pool1 = nn.MaxPool2d(kernel_size=2)            
+        self.dropout1 = nn.Dropout(p=0.5)
+
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3) # (N, 64, 11, 11)
+        self.pool2 = nn.MaxPool2d(kernel_size=2)  
+        self.dropout2 = nn.Dropout(p=0.5)
+
+        # Flattened output size: 64 * 5 * 5 = 1600
+        #self.fc = nn.Linear(64 * 5 * 5, 128)  # Shared hidden fully connected layer
+        self.fc = nn.Linear(2880, 128)
+
+
+        # Two output heads
+        self.out_digit1 = nn.Linear(128, 10)
+        self.out_digit2 = nn.Linear(128, 10)
 
     def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = self.pool1(x)
+        x = self.dropout1(x)
 
-        # TODO use model layers to predict the two digits
+        x = F.relu(self.conv2(x))
+        x = self.pool2(x)
+        x = self.dropout2(x)
+
+        #print("shape",x.shape)
+        x = self.flatten(x)             # (N, 1600)
+        x = F.relu(self.fc(x))          # (N, 128)
+
+        out_first_digit = self.out_digit1(x)   # (N, 10)
+        out_second_digit = self.out_digit2(x)  # (N, 10)
 
         return out_first_digit, out_second_digit
+
 
 def main():
     X_train, y_train, X_test, y_test = U.get_data(path_to_data_dir, use_mini_dataset)

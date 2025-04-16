@@ -18,14 +18,24 @@ class MLP(nn.Module):
     def __init__(self, input_dimension):
         super(MLP, self).__init__()
         self.flatten = Flatten()
-        # TODO initialize model layers here
+
+        # Hidden layer with 64 units
+        self.fc1 = nn.Linear(input_dimension, 64)
+        
+        # Two separate output layers for each digit (assuming 10-class classification)
+        self.out_digit1 = nn.Linear(64, 10)
+        self.out_digit2 = nn.Linear(64, 10)
 
     def forward(self, x):
-        xf = self.flatten(x)
+        xf = self.flatten(x)                # Shape: (batch_size, input_dimension)
+        hidden = F.relu(self.fc1(xf))       # Apply hidden layer with ReLU
 
-        # TODO use model layers to predict the two digits
+        # Separate predictions for each digit
+        out_first_digit = self.out_digit1(hidden)
+        out_second_digit = self.out_digit2(hidden)
 
         return out_first_digit, out_second_digit
+
 
 def main():
     X_train, y_train, X_test, y_test = U.get_data(path_to_data_dir, use_mini_dataset)
