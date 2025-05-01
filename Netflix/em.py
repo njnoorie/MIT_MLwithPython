@@ -3,7 +3,7 @@ from typing import Tuple
 import numpy as np
 from scipy.special import logsumexp
 from common import GaussianMixture
-
+import common
 
 def estep(X: np.ndarray, mixture: GaussianMixture) -> Tuple[np.ndarray, float]:
     """E-step: Softly assigns each datapoint to a gaussian component
@@ -18,85 +18,100 @@ def estep(X: np.ndarray, mixture: GaussianMixture) -> Tuple[np.ndarray, float]:
         float: log-likelihood of the assignment
 
     """
+
     n, d = X.shape
     K = mixture.mu.shape[0]
+    
     post = np.zeros((n, K))
+    mask = X != 0  # shape (n, d) — 1 for observed, 0 for missing
 
     for k in range(K):
-        mu_k = mixture.mu[k]
-        var_k = mixture.var[k]
-        p_k = mixture.p[k]
+        mu_k = mixture.mu[k]        # (d,)
+        var_k = mixture.var[k]      # scalar
+        p_k = mixture.p[k]          # scalar
 
-        # Mask: 1 if value is observed, 0 if missing (assuming 0 means missing)
-        mask = X != 0
-        diff = (X - mu_k) * mask  # broadcast subtraction and apply mask
-        n_obs = mask.sum(axis=1)  # number of observed features for each point
+        # Compute squared distance only on observed features
+        diff = (X - mu_k) * mask    # broadcasted difference with masking
+        squared_diff = np.sum(diff**2, axis=1)  # (n,)
+        num_obs = np.sum(mask, axis=1)          # number of observed dims per example
 
-        # Compute log-likelihood per point for this component
-        log_prob = -0.5 * (n_obs * np.log(2 * np.pi * var_k) + (diff ** 2).sum(axis=1) / var_k)
-        log_prob += np.log(p_k)
+        # Gaussian log-likelihood for observed features only
+        log_prob = -0.5 * (num_obs * np.log(2 * np.pi * var_k) + squared_diff / var_k)
+        post[:, k] = np.exp(log_prob) * p_k
 
-        post[:, k] = np.exp(log_prob)
-
-    # Normalize posterior
+    # Normalize posteriors
     total = np.sum(post, axis=1, keepdims=True)
-    total[total == 0] = 1e-16  # to prevent division by zero
+    total[total == 0] = 1e-16  # avoid division by zero
     post /= total
 
-    # Compute total log-likelihood
+    # Log-likelihood
     log_likelihood = np.sum(np.log(total))
 
     return post, log_likelihood
 
 
 
-
-
-
-def mstep(X: np.ndarray, post: np.ndarray) -> GaussianMixture:
+def mstep(X: np.ndarray, post: np.ndarray, mixture: GaussianMixture,
+          min_variance: float = .25) -> GaussianMixture:
     """M-step: Updates the gaussian mixture by maximizing the log-likelihood
     of the weighted dataset
 
     Args:
-        X: (n, d) array holding the data
+        X: (n, d) array holding the data, with incomplete entries (set to 0)
         post: (n, K) array holding the soft counts
             for all components for all examples
+        mixture: the current gaussian mixture
+        min_variance: the minimum variance for each gaussian
 
     Returns:
         GaussianMixture: the new gaussian mixture
     """
     
-    min_variance = 1e-6
     n, d = X.shape
-    K = post.shape[1]
-    mask = X != 0  # shape (n, d)
+    K = mixture.mu.shape[0]
+    mask = (X != 0).astype(float)             # (n, d) indicator of observed entries
 
-    n_obs = post.sum(axis=0)  # (K,)
-    p = n_obs / n
-
-    mu = np.zeros((K, d))
-    var = np.zeros(K)
+    # Prepare new parameters
+    mu_new = np.zeros_like(mixture.mu)        # (K, d)
+    var_new = np.zeros_like(mixture.var)      # (K,)
+    p_new  = np.zeros_like(mixture.p)         # (K,)
 
     for k in range(K):
-        weight = post[:, k].reshape(-1, 1)  # shape (n, 1)
-        weighted_X = weight * X * mask  # element-wise mask
-        mask_sum = (weight * mask).sum(axis=0)  # sum of weights for observed entries
+        post_k = post[:, k]                   # (n,)
+        N_k = post_k.sum()                    # effective weight of component k
 
-        # Avoid division by zero
-        mask_sum[mask_sum == 0] = 1e-16
-        mu[k] = weighted_X.sum(axis=0) / mask_sum
+        # 1) Mixing weight
+        p_new[k] = N_k / n
 
-        # Variance calculation
-        diff = (X - mu[k]) * mask
-        var[k] = np.sum(post[:, k] * (diff ** 2).sum(axis=1)) / np.sum(post[:, k] * mask.sum(axis=1))
-        var[k] = max(var[k], min_variance)
+        # 2) Means: weighted sums & weighted observation‐counts per dim
+        #    S_k[i] = Σ_j post[j,k] * X[j,i] * mask[j,i]
+        #    W_k[i] = Σ_j post[j,k] * mask[j,i]
+        S_k = (post_k[:, None] * X * mask).sum(axis=0)        # shape (d,)
+        W_k = (post_k[:, None] * mask).sum(axis=0)           # shape (d,)
 
-    return GaussianMixture(mu=mu, var=var, p=p)
- 
+        # start with old mu, then overwrite dims with enough support
+        mu_k = mixture.mu[k].copy()
+        support = (W_k >= 1.0)        # only update coords with ≥1 total weight
+        mu_k[support] = S_k[support] / W_k[support]
+        mu_new[k] = mu_k
 
+        # 3) Variance: spherical, using all observed entries
+        #    Σ = Σ_{j,i obs} post[j,k] * (X[j,i] - mu_k[i])^2 
+        diff = (X - mu_k) * mask                            # zero out missing
+        sq = diff**2
+        weighted_sq = (post_k[:, None] * sq).sum()          # scalar
+        total_obs = (post_k[:, None] * mask).sum()          # total “obs‐weight”
 
+        if total_obs > 0:
+            var_k = weighted_sq / total_obs
+        else:
+            var_k = mixture.var[k]
 
-def run(X: np.ndarray, mixture: GaussianMixture,
+        # floor the variance
+        var_new[k] = max(var_k, min_variance)
+
+    return GaussianMixture(mu=mu_new, var=var_new, p=p_new)
+def run1(X: np.ndarray, mixture: GaussianMixture,
         post: np.ndarray) -> Tuple[GaussianMixture, np.ndarray, float]:
     """Runs the mixture model
 
@@ -111,20 +126,62 @@ def run(X: np.ndarray, mixture: GaussianMixture,
             for all components for all examples
         float: log-likelihood of the current assignment
     """
-    prev_likelihood = -np.inf
-    for _ in range(100):
-        post, log_likelihood = estep(X, mixture)
-        # M-step
-        mixture = mstep(X, post)
+    X_copy = X.copy()
 
-        # Check for convergence
-        if np.abs(log_likelihood - prev_likelihood) < 1e-6:
-            break
-        prev_likelihood = log_likelihood
+    prev_ll = -np.inf
+    ll = None
 
-    return mixture, post, prev_likelihood
+    # safety cap on iterations
+    max_iter = 100
+
+    for _ in range(max_iter):
     
+        # E‑step: recompute posteriors and get new log‑likelihood
+        post, ll = estep(X_copy, mixture)
 
+        # M‑step: fit new parameters to current posteriors
+        mixture = mstep(X_copy, post, mixture)
+
+        # check convergence: Δℓ ≤ tol * |ℓ|
+        if prev_ll != -np.inf and (ll - prev_ll) <= 1e-6 * abs(ll):
+            break
+
+        prev_ll = ll
+
+    return mixture, post, ll
+
+
+def run(X: np.ndarray,
+        mixture: GaussianMixture,
+        post: np.ndarray) -> Tuple[GaussianMixture, np.ndarray, float]:
+    """
+    Runs EM until convergence.
+
+    Convergence when improvement in log‑likelihood ≤ 1e‑6 * |new_ll|.
+    Does not mutate the caller’s X.
+    """
+    # copy so we never overwrite X in place
+    X_copy = X.copy()
+
+    prev_ll = -np.inf
+
+    # do up to max_iter EM iterations
+    for _ in range(100):
+        # E‑step
+        post, ll = estep(X_copy, mixture)
+
+        # check convergence: Δℓ ≤ tol * |ℓ|
+        if prev_ll != -np.inf and (ll - prev_ll) <= 1e-6 * abs(ll):
+            break
+
+        prev_ll = ll
+
+        # M‑step
+        mixture = mstep(X_copy, post, mixture)
+
+    # one final E‑step on the converged mixture
+    post, ll = estep(X_copy, mixture)
+    return mixture, post, ll
 
 def fill_matrix(X: np.ndarray, mixture: GaussianMixture) -> np.ndarray:
     """Fills an incomplete matrix according to a mixture model
@@ -136,4 +193,70 @@ def fill_matrix(X: np.ndarray, mixture: GaussianMixture) -> np.ndarray:
     Returns
         np.ndarray: a (n, d) array with completed data
     """
-    raise NotImplementedError
+    
+    
+    n, d = X.shape
+    K    = mixture.mu.shape[0]
+    mask = (X != 0).astype(float)
+
+    log_w = np.zeros((n, K))
+    for k in range(K):
+        mu_k  = mixture.mu[k]
+        var_k = mixture.var[k]
+
+        # avoid log(0) on zero‐weight clusters
+        if mixture.p[k] > 0:
+            log_pk = np.log(mixture.p[k])
+        else:
+            log_pk = -np.inf
+
+        diff    = (X - mu_k) * mask
+        sq_dist = (diff**2).sum(axis=1)
+        n_obs   = mask.sum(axis=1)
+
+        log_gauss = -0.5*(n_obs*np.log(2*np.pi*var_k) + sq_dist/var_k)
+        log_w[:, k] = log_pk + log_gauss
+
+    # 2) stable normalization via log‐sum‐exp
+    max_log_w = log_w.max(axis=1, keepdims=True)  # (n,1)
+    W = np.exp(log_w - max_log_w)                 # still (n,K)
+    post = W / W.sum(axis=1, keepdims=True)        # (n,K) = p(k|x_obs)
+
+    # 3) reconstruct every row by the posterior‐weighted mean
+    #    X_recon[n,i] = sum_k post[n,k] * mu[k,i]
+    X_recon = post.dot(mixture.mu)                 # (n,d)
+
+    # 4) fill only the missing entries
+    X_pred = X.copy()
+    missing = (X_pred == 0)
+    X_pred[missing] = X_recon[missing]
+
+    return X_pred
+
+
+
+X = np.loadtxt("netflix_incomplete.txt")
+
+#K = [1, 2, 3, 4,12]
+K=[12]
+seed = [0, 1, 2, 3,4]
+mx=None
+for k in K:
+
+    best_cost = -np.inf
+    best_seed = None
+    for s in seed:
+        mixture, post = common.init(X, k, s)
+        # Run EM
+        mixture, post, cost = run(X, mixture, post)
+
+        if cost > best_cost:
+            best_cost = cost
+            best_seed = s
+            mx=mixture
+
+    print(f"EM>>> Best for K={k}: seed={best_seed}, cost={best_cost:.4f}")
+
+X_gold = np.loadtxt('netflix_complete.txt') 
+X_pred = fill_matrix(X_gold, mx)
+print(common.rmse(X_gold, X_pred))
